@@ -90,48 +90,75 @@ class MessengerClient {
  * Return Type: Tuple of [dictionary, string]
  */
   async sendMessage (name, plaintext) {
-
-
     let cert = this.certs[name]
      
-    if(!(name in this.certs) ){
+    if(!(name in this.conns) ){
 
       let rootkey = await computeDH(this.EGKeyPair.sec, cert.pub) 
-      let keypair = await generateEG()
+      var keypair = await generateEG()
       let computedDH = await computeDH(keypair.sec, cert.pub) 
       var [next_root, send_root] = await HKDF(rootkey, computedDH, "ratchet-str")
-      var [send_root, message_key] = await HKDF(send_root, 0, "ratchet-str")
-      let AES_key = await HMACtoHMACKey(message_key, "hello")
-      let HMAC_key = await HMACtoAESKey(send_root, "hi")
+      var AES_key = await HMACtoAESKey(send_root, "AES")
+      send_root = await HMACtoHMACKey(send_root, "HMAC")
       
-    let connState = {
-      keypair : keypair,
-      next_root : next_root,
-      recv_root : null,
-      send_root : send_root
-    }    
-      this.certs[name] = connState
+      let connState = {
+        keypair : keypair,
+        next_root : next_root,
+        recv_root : null,
+        send_root : send_root,
+        recv_pub : cert.pub,
+        curr_sender : true
+      }    
+
+      this.conns[name] = connState
     }
-    
-    
+    else {
+      let connState = this.conns[name]
+      if (connState.curr_sender) {
+        var AES_key = await HMACtoAESKey(connState.send_root, "AES")
+        connState.send_root = await HMACtoHMACKey(connState.send_root, "HMAC")
+        var keypair = connState.keypair
+      }
+      else {
+        var keypair = await generateEG()
+        let computedDH = await computeDH(keypair.sec, connState.recv_pub) 
+        var [next_root, send_root] = await HKDF(connState.next_root, computedDH, "ratchet-str")
+        var AES_key = await HMACtoAESKey(send_root, "AES")
+        send_root = await HMACtoHMACKey(send_root, "HMAC")
+        
+        let connState = {
+          keypair : keypair,
+          next_root : next_root,
+          recv_root : connState.recv_root,
+          send_root : send_root,
+          recv_pub : connState.recv_pub,
+          curr_sender : true
+        }    
 
-    //let salt = genRandomSalt()
-    
+        this.conns[name] = connState
+      }
+    }
 
-    let sendingChainKeyArr = HKDF(computedDH, rootKey, "ratchet-str")
-    let newSalt = sendingChainKeyArr[0] //this.RootKey
-    let sendChainKey = sendingChainKeyArr[1]
-    
+    let ivGov = genRandomSalt()
+    var govkeypair = await generateEG()
+    let govDH = await computeDH(govkeypair.sec, this.govPublicKey) 
+    let govAES = await HMACtoAESKey(govDH, govEncryptionDataStr)
+    let cGov = await encryptWithGCM(govAES, JSON.stringify(cryptoKeyToJSON(AES_key)), ivGov)
 
+    let salt = genRandomSalt()
 
-    const header = {
-        pub : this.EGKeyPair.pub,
+    let header = {
+        pub : keypair.pub,
+        vGov : govkeypair.pub,
+        cGov : cGov,
+        ivGov : ivGov,
         salt : salt
     }
-    const ciphertext = ''
 
+    //encrypt
+    let header_string = JSON.stringify(header)
+    let ciphertext = await encryptWithGCM(AES_key, plaintext, salt, header_string)
 
-    
     return [header, ciphertext]
   }
 
@@ -145,7 +172,15 @@ class MessengerClient {
  * Return Type: string
  */
   async receiveMessage (name, [header, ciphertext]) {
-    throw ('not implemented!')
+    /*let connState = this.conns[name]
+    if(connState.keypair.pub != header.pub){
+      //connState.keypair.pub = 
+      //let newkeypair = await generateEG()
+      let computedDH = await computeDH(keypair.sec, cert.pub)
+    }
+    */
+
+
     return plaintext
   }
 };
