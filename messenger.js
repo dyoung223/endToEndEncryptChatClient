@@ -1,6 +1,8 @@
 'use strict'
 
 /** ******* Imports ********/
+//import java.io.*;  
+const { subtle } = require('node:crypto').webcrypto
 
 const {
   /* The following functions are all of the cryptographic
@@ -126,7 +128,7 @@ class MessengerClient {
         var AES_key = await HMACtoAESKey(send_root, "AES")
         send_root = await HMACtoHMACKey(send_root, "HMAC")
         
-        let connState = {
+        connState = {
           keypair : keypair,
           next_root : next_root,
           recv_root : connState.recv_root,
@@ -140,10 +142,15 @@ class MessengerClient {
     }
 
     let ivGov = genRandomSalt()
-    var govkeypair = await generateEG()
+    let govkeypair = await generateEG()
     let govDH = await computeDH(govkeypair.sec, this.govPublicKey) 
     let govAES = await HMACtoAESKey(govDH, govEncryptionDataStr)
-    let cGov = await encryptWithGCM(govAES, JSON.stringify(cryptoKeyToJSON(AES_key)), ivGov)
+    let keyJSON = await cryptoKeyToJSON(AES_key)
+    //let b = Buffer.from(keyJSON.k, "ascii")
+    let r = await subtle.exportKey("raw", AES_key)
+
+    let cGov = await encryptWithGCM(govAES, r, ivGov)
+    
 
     let salt = genRandomSalt()
 
@@ -152,13 +159,13 @@ class MessengerClient {
         vGov : govkeypair.pub,
         cGov : cGov,
         ivGov : ivGov,
-        salt : salt
+        receiverIV : salt,
     }
 
     //encrypt
     let header_string = JSON.stringify(header)
     let ciphertext = await encryptWithGCM(AES_key, plaintext, salt, header_string)
-
+    
     return [header, ciphertext]
   }
 
@@ -172,15 +179,63 @@ class MessengerClient {
  * Return Type: string
  */
   async receiveMessage (name, [header, ciphertext]) {
-    /*let connState = this.conns[name]
-    if(connState.keypair.pub != header.pub){
-      //connState.keypair.pub = 
-      //let newkeypair = await generateEG()
-      let computedDH = await computeDH(keypair.sec, cert.pub)
+    let cert = this.certs[name]
+     
+    if(!(name in this.conns) ){
+
+      let rootkey = await computeDH(this.EGKeyPair.sec, cert.pub) 
+      let computedDH = await computeDH(this.EGKeyPair.sec, header.pub) 
+      
+      var [next_root, recv_root] = await HKDF(rootkey, computedDH, "ratchet-str")
+      var AES_key = await HMACtoAESKey(recv_root, "AES")
+      recv_root = await HMACtoHMACKey(recv_root, "HMAC")
+      
+      let connState = {
+        keypair : this.EGKeyPair,
+        next_root : next_root,
+        recv_root : recv_root,
+        send_root : null,
+        recv_pub : header.pub,
+        curr_sender : false
+      }    
+
+      this.conns[name] = connState
     }
-    */
+    else {
+      let connState = this.conns[name]
+      if (connState.curr_sender) {
+        if (connState.recv_pub != header.pub){
+          let computedDH = await computeDH(connState.keypair.sec, header.pub) 
+          var [next_root, recv_root] = await HKDF(connState.next_root, computedDH, "ratchet-str")
+          var AES_key = await HMACtoAESKey(recv_root, "AES")
+          recv_root = await HMACtoHMACKey(recv_root, "HMAC")
 
+          connState = {
+            keypair : connState.keypair,
+            next_root : next_root,
+            recv_root : recv_root,
+            send_root : connState.send_root,
+            recv_pub : header.pub,
+            curr_sender : false
+          }    
 
+          this.conns[name] = connState
+        }
+        else{
+          var AES_key = await HMACtoAESKey(connState.recv_root, "AES")
+          connState.recv_root = await HMACtoHMACKey(connState.recv_root, "HMAC")
+        }
+      }
+      else {
+        var AES_key = await HMACtoAESKey(connState.recv_root, "AES")
+        connState.recv_root = await HMACtoHMACKey(connState.recv_root, "HMAC")
+      }
+    }
+    
+    //decrypt
+    let header_string = JSON.stringify(header)
+    let plaintext = byteArrayToString(await decryptWithGCM(AES_key, ciphertext, header.receiverIV, header_string))
+    
     return plaintext
   }
 };
