@@ -99,11 +99,13 @@ class MessengerClient {
         keypair : this.EGKeyPair,
         next_root : rootkey,
         recv_root : null,
+        prev_recv_root : null,
         send_root : null,
         recv_pub : cert.pub,
         curr_sender : false,
         send_cnt : 0,
         recv_cnt : 0,
+        prev_recv_cnt : 0,
         skipped : {}
       }    
       this.conns[name] = connState
@@ -169,11 +171,13 @@ class MessengerClient {
         keypair : this.EGKeyPair,
         next_root : rootkey,
         recv_root : null,
+        prev_recv_root : null,
         send_root : null,
         recv_pub : cert.pub,
         curr_sender : true,
         send_cnt : 0,
         recv_cnt : 0,
+        prev_recv_cnt : 0,
         skipped : {}
       }  
       this.conns[name] = connState
@@ -185,18 +189,47 @@ class MessengerClient {
       if (connState.recv_pub != header.pub){
         let computedDH = await computeDH(connState.keypair.sec, header.pub) 
         var [next_root, recv_root] = await HKDF(connState.next_root, computedDH, "ratchet-str")
+        connState.prev_recv_root = connState.recv_root
+        connState.prev_recv_cnt = connState.recv_cnt
         connState.next_root = next_root
         connState.recv_root = recv_root
         connState.curr_sender = false
         connState.recv_pub = header.pub
         recv_cnt = 0
       }
-      else {
-        throw("We are newly receiving but did not receive a new public key form sender")
+    }
+    else if (connState.recv_pub != header.pub){
+      recv_cnt = connState.prev_recv_cnt
+      if (header.send_cnt < recv_cnt){
+        let AES_key = connState.skipped[[header.pub, header.send_cnt]]
+        delete connState.skipped[[header.pub, header.send_cnt]]
+        let header_string = JSON.stringify(header)
+        let plaintext = byteArrayToString(await decryptWithGCM(AES_key, ciphertext, header.receiverIV, header_string))
+        return plaintext
+      }
+      else{
+        let steps = header.send_cnt - recv_cnt
+        for(let i = 0; i < steps; i++){
+          connState.skipped[[header.pub, recv_cnt + i]] = await HMACtoAESKey(connState.prev_recv_root, "AES")
+          connState.prev_recv_root = await HMACtoHMACKey(connState.prev_recv_root, "HMAC")
+        }
+
+        let AES_key = await HMACtoAESKey(connState.prev_recv_root, "AES")
+        connState.prev_recv_root = await HMACtoHMACKey(connState.prev_recv_root, "HMAC")
+        connState.prev_recv_cnt = header.send_cnt + 1
+
+        //decrypt
+        
+        let header_string = JSON.stringify(header)
+        let plaintext = byteArrayToString(await decryptWithGCM(AES_key, ciphertext, header.receiverIV, header_string))
+        
+        return plaintext
       }
     }
-    else if (header.send_cnt < recv_cnt){
-      let AES_key = connState.skipped[header.send_cnt]
+    
+    if (header.send_cnt < recv_cnt){
+      let AES_key = connState.skipped[[header.pub, header.send_cnt]]
+      delete connState.skipped[[header.pub, header.send_cnt]]
       let header_string = JSON.stringify(header)
       let plaintext = byteArrayToString(await decryptWithGCM(AES_key, ciphertext, header.receiverIV, header_string))
       return plaintext
@@ -204,7 +237,7 @@ class MessengerClient {
       
     let steps = header.send_cnt - recv_cnt
     for(let i = 0; i < steps; i++){
-      connState.skipped[recv_cnt + i] = await HMACtoAESKey(connState.recv_root, "AES")
+      connState.skipped[[header.pub, recv_cnt + i]] = await HMACtoAESKey(connState.recv_root, "AES")
       connState.recv_root = await HMACtoHMACKey(connState.recv_root, "HMAC")
     }
 
